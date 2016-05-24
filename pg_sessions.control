@@ -1,0 +1,5 @@
+# pg_sessions extension
+comment = 'track execution statistics of all Sessions/SQL statements executed'
+default_version = '1.3'
+module_pathname = '$libdir/pg_sessions'
+relocatable = true
