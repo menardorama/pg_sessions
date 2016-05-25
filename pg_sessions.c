@@ -131,10 +131,10 @@ typedef enum pgssVersion
  */
 typedef struct pgssHashKey
 {
-	Oid			userid;			/* user OID */
-	Oid			dbid;			/* database OID */
-	uint32		queryid;		/* query identifier */
-	uint32		pid;		/* session identifier */
+	Oid				userid;							/* user OID */
+	Oid				dbid;							/* database OID */
+	uint32			queryid;						/* query identifier */
+	uint32			pid;							/* session identifier */
 } pgssHashKey;
 
 /*
@@ -142,27 +142,29 @@ typedef struct pgssHashKey
  */
 typedef struct Counters
 {
-	int64		calls;			/* # of times executed */
-	TimestampTz     last_executed_timestamp;         /* last executed timestamp of query */
-	double		total_time;		/* total execution time, in msec */
-	double		min_time;		/* minimim execution time in msec */
-	double		max_time;		/* maximum execution time in msec */
-	double		mean_time;		/* mean execution time in msec */
-	double		sum_var_time;	/* sum of variances in execution time in msec */
-	int64		rows;			/* total # of retrieved or affected rows */
-	int64		shared_blks_hit;	/* # of shared buffer hits */
-	int64		shared_blks_read;		/* # of shared disk blocks read */
-	int64		shared_blks_dirtied;	/* # of shared disk blocks dirtied */
-	int64		shared_blks_written;	/* # of shared disk blocks written */
-	int64		local_blks_hit; /* # of local buffer hits */
-	int64		local_blks_read;	/* # of local disk blocks read */
-	int64		local_blks_dirtied;		/* # of local disk blocks dirtied */
-	int64		local_blks_written;		/* # of local disk blocks written */
-	int64		temp_blks_read; /* # of temp blocks read */
-	int64		temp_blks_written;		/* # of temp blocks written */
-	double		blk_read_time;	/* time spent reading, in msec */
-	double		blk_write_time; /* time spent writing, in msec */
-	double		usage;			/* usage factor */
+	int64			calls;							/* # of times executed */
+	TimestampTz     last_executed_timestamp;        /* last executed timestamp of query */
+	int64			state;							/* execution state 1 = Start, 2 = Run, 3 = Finish, 4 = End
+													 * (Utility statements will always have a status = 4) */
+	double			total_time;						/* total execution time, in msec */
+	double			min_time;						/* minimim execution time in msec */
+	double			max_time;						/* maximum execution time in msec */
+	double			mean_time;						/* mean execution time in msec */
+	double			sum_var_time;					/* sum of variances in execution time in msec */
+	int64			rows;							/* total # of retrieved or affected rows */
+	int64			shared_blks_hit;				/* # of shared buffer hits */
+	int64			shared_blks_read;				/* # of shared disk blocks read */
+	int64			shared_blks_dirtied;			/* # of shared disk blocks dirtied */
+	int64			shared_blks_written;			/* # of shared disk blocks written */
+	int64			local_blks_hit; 				/* # of local buffer hits */
+	int64			local_blks_read;				/* # of local disk blocks read */
+	int64			local_blks_dirtied;				/* # of local disk blocks dirtied */
+	int64			local_blks_written;				/* # of local disk blocks written */
+	int64			temp_blks_read; 				/* # of temp blocks read */
+	int64			temp_blks_written;				/* # of temp blocks written */
+	double			blk_read_time;					/* time spent reading, in msec */
+	double			blk_write_time; 				/* time spent writing, in msec */
+	double			usage;							/* usage factor */
 } Counters;
 
 /*
@@ -174,12 +176,12 @@ typedef struct Counters
  */
 typedef struct pgssEntry
 {
-	pgssHashKey key;			/* hash key of entry - MUST BE FIRST */
-	Counters	counters;		/* the statistics for this query */
-	Size		query_offset;	/* query text offset in external file */
-	int			query_len;		/* # of valid bytes in query string, or -1 */
-	int			encoding;		/* query text encoding */
-	slock_t		mutex;			/* protects the counters only */
+	pgssHashKey 	key;							/* hash key of entry - MUST BE FIRST */
+	Counters		counters;						/* the statistics for this query */
+	Size			query_offset;					/* query text offset in external file */
+	int				query_len;						/* # of valid bytes in query string, or -1 */
+	int				encoding;						/* query text encoding */
+	slock_t			mutex;							/* protects the counters only */
 } pgssEntry;
 
 /*
@@ -187,13 +189,13 @@ typedef struct pgssEntry
  */
 typedef struct pgssSharedState
 {
-	LWLock	   *lock;			/* protects hashtable search/modification */
-	double		cur_median_usage;		/* current median usage in hashtable */
-	Size		mean_query_len; /* current mean entry text length */
-	slock_t		mutex;			/* protects following fields only: */
-	Size		extent;			/* current extent of query file */
-	int			n_writers;		/* number of active writers to query file */
-	int			gc_count;		/* query file garbage collection cycle count */
+	LWLock			*lock;							/* protects hashtable search/modification */
+	double			cur_median_usage;				/* current median usage in hashtable */
+	Size			mean_query_len;					/* current mean entry text length */
+	slock_t			mutex;							/* protects following fields only: */
+	Size			extent;							/* current extent of query file */
+	int				n_writers;						/* number of active writers to query file */
+	int				gc_count;						/* query file garbage collection cycle count */
 } pgssSharedState;
 
 /*
@@ -201,8 +203,8 @@ typedef struct pgssSharedState
  */
 typedef struct pgssLocationLen
 {
-	int			location;		/* start offset in query text */
-	int			length;			/* length in bytes, or -1 to ignore */
+	int				location;						/* start offset in query text */
+	int				length;							/* length in bytes, or -1 to ignore */
 } pgssLocationLen;
 
 /*
@@ -249,9 +251,9 @@ static HTAB *pgss_hash = NULL;
 
 typedef enum
 {
-	PGSS_TRACK_NONE,			/* track no statements */
-	PGSS_TRACK_TOP,				/* only top level statements */
-	PGSS_TRACK_ALL				/* all statements, including nested ones */
+	PGSS_TRACK_NONE,								/* track no statements */
+	PGSS_TRACK_TOP,									/* only top level statements */
+	PGSS_TRACK_ALL									/* all statements, including nested ones */
 }	PGSSTrackLevel;
 
 static const struct config_enum_entry track_options[] =
@@ -262,10 +264,10 @@ static const struct config_enum_entry track_options[] =
 	{NULL, 0, false}
 };
 
-static int	pgss_max;			/* max # statements to track */
-static int	pgss_track;			/* tracking level */
-static bool pgss_track_utility; /* whether to track utility commands */
-static bool pgss_save;			/* whether to save stats across shutdown */
+static int	pgss_max;								/* max # statements to track */
+static int	pgss_track;								/* tracking level */
+static bool pgss_track_utility;						/* whether to track utility commands */
+static bool pgss_save;								/* whether to save stats across shutdown */
 
 
 #define pgss_enabled() \
@@ -305,7 +307,7 @@ static void pgss_ProcessUtility(Node *parsetree, const char *queryString,
 static uint32 pgss_hash_fn(const void *key, Size keysize);
 static int	pgss_match_fn(const void *key1, const void *key2, Size keysize);
 static uint32 pgss_hash_string(const char *str);
-static void pgss_store(const char *query, uint32 queryId,
+static void pgss_store(const char *query, uint32 queryId, uint64 state,
 		   double total_time, uint64 rows,
 		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate);
@@ -825,9 +827,11 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 	 * the normalized string would be the same as the query text anyway, so
 	 * there's no need for an early entry.
 	 */
+	int64			Status = 0;
 	if (jstate.clocations_count > 0)
 		pgss_store(pstate->p_sourcetext,
 				   query->queryId,
+				   Status,
 				   0,
 				   0,
 				   NULL,
@@ -874,9 +878,10 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	                 * levels of hook all do this.)
 	                 */
 	                InstrEndLoop(queryDesc->totaltime);
-	
+	                int64			Status = 1;
 	                pgss_store(queryDesc->sourceText, 
 	                                   queryDesc->plannedstmt->queryId,
+									   Status,
 	                                   queryDesc->totaltime->total * 1000.0,                /* convert to msec */
 	                                   queryDesc->estate->es_processed,
 	                                   &queryDesc->totaltime->bufusage,
@@ -899,6 +904,14 @@ pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
 		nested_level--;
+        int64			Status = 2;
+        pgss_store(queryDesc->sourceText,
+                           queryDesc->plannedstmt->queryId,
+						   Status,
+                           queryDesc->totaltime->total * 1000.0,                /* convert to msec */
+                           queryDesc->estate->es_processed,
+                           &queryDesc->totaltime->bufusage,
+                           NULL);
 	}
 	PG_CATCH();
 	{
@@ -922,6 +935,14 @@ pgss_ExecutorFinish(QueryDesc *queryDesc)
 		else
 			standard_ExecutorFinish(queryDesc);
 		nested_level--;
+        int64			Status = 3;
+        pgss_store(queryDesc->sourceText,
+                           queryDesc->plannedstmt->queryId,
+						   Status,
+                           queryDesc->totaltime->total * 1000.0,                /* convert to msec */
+                           queryDesc->estate->es_processed,
+                           &queryDesc->totaltime->bufusage,
+                           NULL);
 	}
 	PG_CATCH();
 	{
@@ -938,7 +959,7 @@ static void
 pgss_ExecutorEnd(QueryDesc *queryDesc)
 {
 	uint32		queryId = queryDesc->plannedstmt->queryId;
-
+	int64			Status = 4;
 	if (queryId != 0 && queryDesc->totaltime && pgss_enabled())
 	{
 		/*
@@ -948,7 +969,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		InstrEndLoop(queryDesc->totaltime);
 
 		pgss_store(queryDesc->sourceText,
-				   queryId,
+				   queryId, Status,
 				   queryDesc->totaltime->total * 1000.0,		/* convert to msec */
 				   queryDesc->estate->es_processed,
 				   &queryDesc->totaltime->bufusage,
@@ -1063,12 +1084,14 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		/* For utility statements, we just hash the query string directly */
 		queryId = pgss_hash_string(queryString);
 
-		pgss_store(queryString,
-				   queryId,
-				   INSTR_TIME_GET_MILLISEC(duration),
-				   rows,
-				   &bufusage,
-				   NULL);
+        int64			Status = 4;
+        pgss_store(queryString,
+                           queryId,
+						   Status,
+						   INSTR_TIME_GET_MILLISEC(duration),
+						   rows,
+						   &bufusage,
+                           NULL);
 	}
 	else
 	{
@@ -1134,7 +1157,7 @@ pgss_hash_string(const char *str)
  * query string.  total_time, rows, bufusage are ignored in this case.
  */
 static void
-pgss_store(const char *query, uint32 queryId,
+pgss_store(const char *query, uint32 queryId, uint64 State,
 		   double total_time, uint64 rows,
 		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate)
@@ -1271,6 +1294,7 @@ pgss_store(const char *query, uint32 queryId,
 		}
 		e->counters.rows += rows;
 		e->counters.last_executed_timestamp = GetCurrentTimestamp();
+		e->counters.state = State;
 		e->counters.shared_blks_hit += bufusage->shared_blks_hit;
 		e->counters.shared_blks_read += bufusage->shared_blks_read;
 		e->counters.shared_blks_dirtied += bufusage->shared_blks_dirtied;
@@ -1314,8 +1338,8 @@ pg_sessions_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_0	14
 #define PG_STAT_STATEMENTS_COLS_V1_1	18
 #define PG_STAT_STATEMENTS_COLS_V1_2	19
-#define PG_STAT_STATEMENTS_COLS_V1_3	25
-#define PG_STAT_STATEMENTS_COLS			26		/* maximum of above */
+#define PG_STAT_STATEMENTS_COLS_V1_3	26
+#define PG_STAT_STATEMENTS_COLS			27		/* maximum of above */
 
 /*
  * Retrieve statement statistics.
@@ -1591,6 +1615,7 @@ pg_sessions_internal(FunctionCallInfo fcinfo,
 
 		values[i++] = Int64GetDatumFast(tmp.calls);
 		values[i++] = TimestampTzGetDatum(tmp.last_executed_timestamp);
+		values[i++] = Int64GetDatumFast(tmp.state);
 		values[i++] = Float8GetDatumFast(tmp.total_time);
 		if (api_version >= PGSS_V1_3)
 		{
