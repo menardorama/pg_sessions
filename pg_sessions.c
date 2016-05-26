@@ -4,7 +4,7 @@
  *		Track statement execution per pid and queryid  across a
  *               whole database cluster.
  *
- *           THIS IS A FORK VERSION OF PG_STAT_STATEMENTS !!!!!!
+ *           THIS IS A FORK VERSION OF pg_sessionsS !!!!!!
  *                  THANKS TO THE POSTGRES COMUNITY
  *
  * Execution costs are totalled for each distinct source query, and kept in
@@ -81,6 +81,10 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
+#include <sys/vfs.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <inttypes.h>
 
 PG_MODULE_MAGIC;
 
@@ -96,6 +100,59 @@ PG_MODULE_MAGIC;
  * strings, so placing the file on a faster filesystem is not compelling.
  */
 #define PGSS_TEXT_FILE	PG_STAT_TMP_DIR "/pgss_query_texts.stat"
+
+/* This section is added to manage the system metrics,
+ * enum declaration for procfs */
+#ifdef __linux__
+#define FULLCOMM_LEN 1024
+#define BIGINT_LEN 20
+#define FLOAT_LEN 20
+#define INTEGER_LEN 10
+enum proctab {i_pid, i_comm, i_fullcomm, i_state, i_ppid, i_pgrp, i_session,
+		i_tty_nr, i_tpgid, i_flags, i_minflt, i_cminflt, i_majflt, i_cmajflt,
+		i_utime, i_stime, i_cutime, i_cstime, i_priority, i_nice,
+		i_num_threads, i_itrealvalue, i_starttime, i_vsize, i_rss,
+		i_exit_signal, i_processor, i_rt_priority, i_policy,
+		i_delayacct_blkio_ticks, i_uid, i_username, i_rchar, i_wchar, i_syscr,
+		i_syscw, i_reads, i_writes, i_cwrites};
+
+/* Function to parse PROCFS stat files */
+#define PROCFS "/proc"
+
+#define GET_NEXT_VALUE(p, q, value, length, msg, delim) \
+        if ((q = strchr(p, delim)) == NULL) \
+        { \
+            elog(ERROR, msg); \
+            return 0; \
+        } \
+        length = q - p; \
+        strncpy(value, p, length); \
+        value[length] = '\0'; \
+        p = q + 1;
+#define SKIP_TOKEN(p) \
+		/* Skipping leading white space. */ \
+		while (isspace(*p)) \
+			p++; \
+		/* Skip token. */ \
+		while (*p && !isspace(*p)) \
+			p++; \
+		/* Skipping trailing white space. */ \
+		while (isspace(*p)) \
+			p++;
+#define GET_VALUE(value) \
+		p = strchr(p, ':'); \
+		++p; \
+		++p; \
+		q = strchr(p, '\n'); \
+		len = q - p; \
+		if (len >= BIGINT_LEN) \
+		{ \
+			elog(ERROR, "value is larger than the buffer: %d\n", __LINE__); \
+			return 0; \
+		} \
+		strncpy(value, p, len); \
+		value[len] = '\0';
+#endif /* __linux__ */
 
 /* Magic number identifying the stats file format */
 static const uint32 PGSS_FILE_HEADER = 0x20140125;
@@ -165,6 +222,16 @@ typedef struct Counters
 	double			blk_read_time;					/* time spent reading, in msec */
 	double			blk_write_time; 				/* time spent writing, in msec */
 	double			usage;							/* usage factor */
+	int64			user_time;						/* CPU User Time (in Clock Ticks) */
+	int64			system_time;					/* CPU System Time (in Clock Ticks) */
+	int64			virtual_memory_size;			/* Virtual Memory size */
+	int64			resident_memory_size;			/* Resident Memory size */
+	int64			bytes_reads;					/* All reads (in bytes) */
+	int64			bytes_writes;					/* All writes (in bytes) */
+	int64			iops_reads;						/* Number of read iops */
+	int64			iops_writes;					/* Number of write iops */
+	int64			bytes_preads;					/* Physical reads */
+	int64			bytes_pwrites;					/* Physical writes */
 } Counters;
 
 /*
@@ -336,8 +403,8 @@ static char *generate_normalized_query(pgssJumbleState *jstate, const char *quer
 						  int *query_len_p, int encoding);
 static void fill_in_constant_lengths(pgssJumbleState *jstate, const char *query);
 static int	comp_location(const void *a, const void *b);
-
-
+int get_proctab(uint32 session_id, char **result);
+static int64_t S64(const char *s);
 /*
  * Module load callback
  */
@@ -375,7 +442,7 @@ _PG_init(void)
 			   "Selects which statements are tracked by pg_sessions.",
 							 NULL,
 							 &pgss_track,
-							 PGSS_TRACK_TOP,
+							 PGSS_TRACK_ALL,
 							 track_options,
 							 PGC_SUSET,
 							 0,
@@ -641,19 +708,19 @@ pgss_shmem_startup(void)
 read_error:
 	ereport(LOG,
 			(errcode_for_file_access(),
-			 errmsg("could not read pg_stat_statement file \"%s\": %m",
+			 errmsg("could not read pg_sessions file \"%s\": %m",
 					PGSS_DUMP_FILE)));
 	goto fail;
 data_error:
 	ereport(LOG,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("ignoring invalid data in pg_stat_statement file \"%s\"",
+			 errmsg("ignoring invalid data in pg_sessions file \"%s\"",
 					PGSS_DUMP_FILE)));
 	goto fail;
 write_error:
 	ereport(LOG,
 			(errcode_for_file_access(),
-			 errmsg("could not write pg_stat_statement file \"%s\": %m",
+			 errmsg("could not write pg_sessions file \"%s\": %m",
 					PGSS_TEXT_FILE)));
 fail:
 	if (buffer)
@@ -760,7 +827,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 error:
 	ereport(LOG,
 			(errcode_for_file_access(),
-			 errmsg("could not write pg_stat_statement file \"%s\": %m",
+			 errmsg("could not write pg_sessions file \"%s\": %m",
 					PGSS_DUMP_FILE ".tmp")));
 	if (qbuffer)
 		free(qbuffer);
@@ -776,6 +843,7 @@ error:
 static void
 pgss_post_parse_analyze(ParseState *pstate, Query *query)
 {
+	int64			Status;
 	pgssJumbleState jstate;
 	if (prev_post_parse_analyze_hook)
 		prev_post_parse_analyze_hook(pstate, query);
@@ -827,7 +895,7 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 	 * the normalized string would be the same as the query text anyway, so
 	 * there's no need for an early entry.
 	 */
-	int64			Status = 0;
+	Status = 0;
 	if (jstate.clocations_count > 0)
 		pgss_store(pstate->p_sourcetext,
 				   query->queryId,
@@ -844,7 +912,7 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 static void
 pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-
+	int64			Status;
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
@@ -878,7 +946,7 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	                 * levels of hook all do this.)
 	                 */
 	                InstrEndLoop(queryDesc->totaltime);
-	                int64			Status = 1;
+	                Status = 1;
 	                pgss_store(queryDesc->sourceText, 
 	                                   queryDesc->plannedstmt->queryId,
 									   Status,
@@ -896,6 +964,7 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 static void
 pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 {
+	int64			Status;
 	nested_level++;
 	PG_TRY();
 	{
@@ -904,7 +973,7 @@ pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
 		nested_level--;
-        int64			Status = 2;
+        Status = 2;
         pgss_store(queryDesc->sourceText,
                            queryDesc->plannedstmt->queryId,
 						   Status,
@@ -927,6 +996,7 @@ pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 static void
 pgss_ExecutorFinish(QueryDesc *queryDesc)
 {
+	int64			Status;
 	nested_level++;
 	PG_TRY();
 	{
@@ -935,7 +1005,7 @@ pgss_ExecutorFinish(QueryDesc *queryDesc)
 		else
 			standard_ExecutorFinish(queryDesc);
 		nested_level--;
-        int64			Status = 3;
+        Status = 3;
         pgss_store(queryDesc->sourceText,
                            queryDesc->plannedstmt->queryId,
 						   Status,
@@ -959,7 +1029,7 @@ static void
 pgss_ExecutorEnd(QueryDesc *queryDesc)
 {
 	uint32		queryId = queryDesc->plannedstmt->queryId;
-	int64			Status = 4;
+	int64			Status;
 	if (queryId != 0 && queryDesc->totaltime && pgss_enabled())
 	{
 		/*
@@ -967,7 +1037,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		 * levels of hook all do this.)
 		 */
 		InstrEndLoop(queryDesc->totaltime);
-
+		Status = 4;
 		pgss_store(queryDesc->sourceText,
 				   queryId, Status,
 				   queryDesc->totaltime->total * 1000.0,		/* convert to msec */
@@ -1015,6 +1085,7 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		BufferUsage bufusage_start,
 					bufusage;
 		uint32		queryId;
+		int64		Status;
 
 		bufusage_start = pgBufferUsage;
 		INSTR_TIME_SET_CURRENT(start);
@@ -1084,7 +1155,8 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		/* For utility statements, we just hash the query string directly */
 		queryId = pgss_hash_string(queryString);
 
-        int64			Status = 4;
+
+        Status = 4;
         pgss_store(queryString,
                            queryId,
 						   Status,
@@ -1167,6 +1239,8 @@ pgss_store(const char *query, uint32 queryId, uint64 State,
 	char	   *norm_query = NULL;
 	int			encoding = GetDatabaseEncoding();
 	int			query_len;
+	char		**values;
+
 
 	Assert(query != NULL);
 
@@ -1309,6 +1383,146 @@ pgss_store(const char *query, uint32 queryId, uint64 State,
 		e->counters.blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->blk_write_time);
 		e->counters.usage += USAGE_EXEC(total_time);
 
+
+		/* Now fetching system metrics for the given pid
+		 * We define the structure
+		*/
+		values = NULL;
+		values = (char **) palloc(39 * sizeof(char *));
+		values[i_pid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_comm] = (char *) palloc(1024 * sizeof(char));
+		values[i_state] = (char *) palloc(2 * sizeof(char));
+		values[i_ppid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_pgrp] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_session] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_tty_nr] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_tpgid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_flags] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_minflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_cminflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_majflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_cmajflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+
+		/* FIXME: Need to figure out correct length to hold a C double type. */
+		values[i_utime] = (char *) palloc(32 * sizeof(char));
+		values[i_stime] = (char *) palloc(32 * sizeof(char));
+
+		values[i_cutime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_cstime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_priority] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_nice] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_num_threads] =
+				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_itrealvalue] =
+				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_starttime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_vsize] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_rss] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_exit_signal] =
+				(char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_processor] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_rt_priority] =
+				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_policy] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_delayacct_blkio_ticks] =
+				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_uid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
+		values[i_rchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_wchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_syscr] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_syscw] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_reads] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_writes] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+		values[i_cwrites] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+
+		if (get_proctab(key.pid, values) == 1)
+		{
+			/* CPU User Time */
+			if (e->counters.user_time > 0)
+			{
+				e->counters.user_time = S64(values[i_utime]) - e->counters.user_time;
+			}
+			else
+			{
+				e->counters.user_time = S64(values[i_utime]);
+			}
+
+			/* CPU System Time */
+			if (e->counters.system_time > 0)
+			{
+				e->counters.system_time = S64(values[i_stime]) - e->counters.system_time;
+			}
+			else
+			{
+				e->counters.system_time = S64(values[i_stime]);
+			}
+
+			/* Virtual memory size */
+			e->counters.virtual_memory_size = S64(values[i_vsize]);
+
+			/*Resident Memory size */
+			e->counters.resident_memory_size = S64(values[i_rss]);
+
+			/* Bytes Read (All) */
+			if (e->counters.bytes_reads > 0)
+			{
+				e->counters.bytes_reads = S64(values[i_rchar]) - e->counters.bytes_reads;
+			}
+			else
+			{
+				e->counters.bytes_reads = S64(values[i_rchar]);
+			}
+
+			/* Bytes Writes (All) */
+			if (e->counters.bytes_writes > 0)
+			{
+				e->counters.bytes_writes = S64(values[i_wchar]) - e->counters.bytes_writes;
+			}
+			else
+			{
+				e->counters.bytes_writes = S64(values[i_wchar]);
+			}
+
+			/* IOPS Read */
+			if (e->counters.iops_reads > 0)
+			{
+				e->counters.iops_reads = S64(values[i_syscr]) - e->counters.iops_reads;
+			}
+			else
+			{
+				e->counters.iops_writes = S64(values[i_syscw]);
+			}
+
+			/* IOPS Writes */
+			if (e->counters.iops_writes > 0)
+			{
+				e->counters.iops_writes = S64(values[i_syscw]) - e->counters.iops_writes;
+			}
+			else
+			{
+				e->counters.iops_writes = S64(values[i_syscw]);
+			}
+
+			/* Physical Reads */
+			if (e->counters.bytes_preads > 0)
+			{
+				e->counters.bytes_preads = S64(values[i_reads]) - e->counters.bytes_preads;
+			}
+			else
+			{
+				e->counters.bytes_preads = S64(values[i_reads]);
+			}
+
+			/* Physical Writes */
+			if (e->counters.bytes_pwrites > 0)
+			{
+				e->counters.bytes_pwrites = S64(values[i_writes]) - e->counters.bytes_pwrites;
+			}
+			else
+			{
+				e->counters.bytes_pwrites = S64(values[i_writes]);
+			}
+		}
 		SpinLockRelease(&e->mutex);
 	}
 
@@ -1319,6 +1533,22 @@ done:
 	if (norm_query)
 		pfree(norm_query);
 }
+
+/* Stolen from http://stackoverflow.com/questions/17002969/how-to-convert-string-to-int64-t */
+
+static int64_t S64(const char *s) {
+  int64_t i;
+  char c ;
+  int scanned = sscanf(s, "%" SCNd64 "%c", &i, &c);
+  if (scanned == 1) return i;
+  if (scanned > 1) {
+    // TBD about extra data found
+    return i;
+    }
+  // TBD failed to scan;
+  return 0;
+}
+
 
 /*
  * Reset all statement statistics.
@@ -1335,11 +1565,11 @@ pg_sessions_reset(PG_FUNCTION_ARGS)
 }
 
 /* Number of output arguments (columns) for various API versions */
-#define PG_STAT_STATEMENTS_COLS_V1_0	14
-#define PG_STAT_STATEMENTS_COLS_V1_1	18
-#define PG_STAT_STATEMENTS_COLS_V1_2	19
-#define PG_STAT_STATEMENTS_COLS_V1_3	26
-#define PG_STAT_STATEMENTS_COLS			27		/* maximum of above */
+#define pg_sessionsS_COLS_V1_0	14
+#define pg_sessionsS_COLS_V1_1	18
+#define pg_sessionsS_COLS_V1_2	19
+#define pg_sessionsS_COLS_V1_3	36
+#define pg_sessionsS_COLS			37		/* maximum of above */
 
 /*
  * Retrieve statement statistics.
@@ -1436,21 +1666,21 @@ pg_sessions_internal(FunctionCallInfo fcinfo,
 	 */
 	switch (tupdesc->natts)
 	{
-		case PG_STAT_STATEMENTS_COLS_V1_0:
+		case pg_sessionsS_COLS_V1_0:
 			if (api_version != PGSS_V1_0)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
-		case PG_STAT_STATEMENTS_COLS_V1_1:
+		case pg_sessionsS_COLS_V1_1:
 			/* pg_sessions() should have told us 1.0 */
 			if (api_version != PGSS_V1_0)
 				elog(ERROR, "incorrect number of output arguments");
 			api_version = PGSS_V1_1;
 			break;
-		case PG_STAT_STATEMENTS_COLS_V1_2:
+		case pg_sessionsS_COLS_V1_2:
 			if (api_version != PGSS_V1_2)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
-		case PG_STAT_STATEMENTS_COLS_V1_3:
+		case pg_sessionsS_COLS_V1_3:
 			if (api_version != PGSS_V1_3)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
@@ -1533,8 +1763,8 @@ pg_sessions_internal(FunctionCallInfo fcinfo,
 	hash_seq_init(&hash_seq, pgss_hash);
 	while ((entry = hash_seq_search(&hash_seq)) != NULL)
 	{
-		Datum		values[PG_STAT_STATEMENTS_COLS];
-		bool		nulls[PG_STAT_STATEMENTS_COLS];
+		Datum		values[pg_sessionsS_COLS];
+		bool		nulls[pg_sessionsS_COLS];
 		int			i = 0;
 		Counters	tmp;
 		double		stddev;
@@ -1617,6 +1847,7 @@ pg_sessions_internal(FunctionCallInfo fcinfo,
 		values[i++] = TimestampTzGetDatum(tmp.last_executed_timestamp);
 		values[i++] = Int64GetDatumFast(tmp.state);
 		values[i++] = Float8GetDatumFast(tmp.total_time);
+
 		if (api_version >= PGSS_V1_3)
 		{
 			values[i++] = Float8GetDatumFast(tmp.min_time);
@@ -1653,11 +1884,22 @@ pg_sessions_internal(FunctionCallInfo fcinfo,
 			values[i++] = Float8GetDatumFast(tmp.blk_read_time);
 			values[i++] = Float8GetDatumFast(tmp.blk_write_time);
 		}
+		values[i++] = Int64GetDatumFast(tmp.user_time);
+		values[i++] = Int64GetDatumFast(tmp.system_time);
+		values[i++] = Int64GetDatumFast(tmp.virtual_memory_size);
+		values[i++] = Int64GetDatumFast(tmp.resident_memory_size);
+		values[i++] = Int64GetDatumFast(tmp.bytes_reads);
+		values[i++] = Int64GetDatumFast(tmp.bytes_writes);
+		values[i++] = Int64GetDatumFast(tmp.iops_reads);
+		values[i++] = Int64GetDatumFast(tmp.iops_writes);
+		values[i++] = Int64GetDatumFast(tmp.bytes_preads);
+		values[i++] = Int64GetDatumFast(tmp.bytes_pwrites);
 
-		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
-					 api_version == PGSS_V1_1 ? PG_STAT_STATEMENTS_COLS_V1_1 :
-					 api_version == PGSS_V1_2 ? PG_STAT_STATEMENTS_COLS_V1_2 :
-					 api_version == PGSS_V1_3 ? PG_STAT_STATEMENTS_COLS_V1_3 :
+
+		Assert(i == (api_version == PGSS_V1_0 ? pg_sessionsS_COLS_V1_0 :
+					 api_version == PGSS_V1_1 ? pg_sessionsS_COLS_V1_1 :
+					 api_version == PGSS_V1_2 ? pg_sessionsS_COLS_V1_2 :
+					 api_version == PGSS_V1_3 ? pg_sessionsS_COLS_V1_3 :
 					 -1 /* fail if you forget to update this assert */ ));
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
@@ -1901,7 +2143,7 @@ qtext_store(const char *query, int query_len,
 error:
 	ereport(LOG,
 			(errcode_for_file_access(),
-			 errmsg("could not write pg_stat_statement file \"%s\": %m",
+			 errmsg("could not write pg_sessions file \"%s\": %m",
 					PGSS_TEXT_FILE)));
 
 	if (fd >= 0)
@@ -1943,7 +2185,7 @@ qtext_load_file(Size *buffer_size)
 		if (errno != ENOENT)
 			ereport(LOG,
 					(errcode_for_file_access(),
-				   errmsg("could not read pg_stat_statement file \"%s\": %m",
+				   errmsg("could not read pg_sessions file \"%s\": %m",
 						  PGSS_TEXT_FILE)));
 		return NULL;
 	}
@@ -1953,7 +2195,7 @@ qtext_load_file(Size *buffer_size)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
-				 errmsg("could not stat pg_stat_statement file \"%s\": %m",
+				 errmsg("could not stat pg_sessions file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 		CloseTransientFile(fd);
 		return NULL;
@@ -1969,7 +2211,7 @@ qtext_load_file(Size *buffer_size)
 		ereport(LOG,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
 				 errmsg("out of memory"),
-				 errdetail("Could not allocate enough memory to read pg_stat_statement file \"%s\".",
+				 errdetail("Could not allocate enough memory to read pg_sessions file \"%s\".",
 						   PGSS_TEXT_FILE)));
 		CloseTransientFile(fd);
 		return NULL;
@@ -1988,7 +2230,7 @@ qtext_load_file(Size *buffer_size)
 		if (errno)
 			ereport(LOG,
 					(errcode_for_file_access(),
-				   errmsg("could not read pg_stat_statement file \"%s\": %m",
+				   errmsg("could not read pg_sessions file \"%s\": %m",
 						  PGSS_TEXT_FILE)));
 		free(buf);
 		CloseTransientFile(fd);
@@ -2118,7 +2360,7 @@ gc_qtexts(void)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
-				 errmsg("could not write pg_stat_statement file \"%s\": %m",
+				 errmsg("could not write pg_sessions file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 		goto gc_fail;
 	}
@@ -2148,7 +2390,7 @@ gc_qtexts(void)
 		{
 			ereport(LOG,
 					(errcode_for_file_access(),
-				  errmsg("could not write pg_stat_statement file \"%s\": %m",
+				  errmsg("could not write pg_sessions file \"%s\": %m",
 						 PGSS_TEXT_FILE)));
 			hash_seq_term(&hash_seq);
 			goto gc_fail;
@@ -2166,14 +2408,14 @@ gc_qtexts(void)
 	if (ftruncate(fileno(qfile), extent) != 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
-			   errmsg("could not truncate pg_stat_statement file \"%s\": %m",
+			   errmsg("could not truncate pg_sessions file \"%s\": %m",
 					  PGSS_TEXT_FILE)));
 
 	if (FreeFile(qfile))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
-				 errmsg("could not write pg_stat_statement file \"%s\": %m",
+				 errmsg("could not write pg_sessions file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 		qfile = NULL;
 		goto gc_fail;
@@ -2233,7 +2475,7 @@ gc_fail:
 	if (qfile == NULL)
 		ereport(LOG,
 				(errcode_for_file_access(),
-			  errmsg("could not write new pg_stat_statement file \"%s\": %m",
+			  errmsg("could not write new pg_sessions file \"%s\": %m",
 					 PGSS_TEXT_FILE)));
 	else
 		FreeFile(qfile);
@@ -2285,7 +2527,7 @@ entry_reset(void)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
-				 errmsg("could not create pg_stat_statement file \"%s\": %m",
+				 errmsg("could not create pg_sessions file \"%s\": %m",
 						PGSS_TEXT_FILE)));
 		goto done;
 	}
@@ -2294,7 +2536,7 @@ entry_reset(void)
 	if (ftruncate(fileno(qfile), 0) != 0)
 		ereport(LOG,
 				(errcode_for_file_access(),
-			   errmsg("could not truncate pg_stat_statement file \"%s\": %m",
+			   errmsg("could not truncate pg_sessions file \"%s\": %m",
 					  PGSS_TEXT_FILE)));
 
 	FreeFile(qfile);
@@ -3127,4 +3369,260 @@ comp_location(const void *a, const void *b)
 		return +1;
 	else
 		return 0;
+}
+
+
+int
+get_proctab(uint32 session_id, char **result)
+{
+
+	/*
+ 	* For details on the Linux process table, see the description of
+ 	* /proc/PID/stat in Documentation/filesystems/proc.txt in the Linux source
+ 	* code.
+ 	*/
+
+	int length;
+
+	struct stat stat_struct;
+
+	struct statfs sb;
+	int fd;
+	int len;
+	char buffer[4096];
+	char *p;
+	char *q;
+
+	/* Check if /proc is mounted. */
+	if (statfs(PROCFS, &sb) < 0)
+	{
+		elog(ERROR, "proc filesystem not mounted on " PROCFS "\n");
+		return 0;
+	}
+
+	/* Read the stat info for the pid. */
+
+
+	/* Get the full command line information. */
+	snprintf(buffer, sizeof(buffer) - 1, "%s/%d/cmdline", PROCFS, session_id);
+	fd = open(buffer, O_RDONLY);
+	if (fd == -1)
+	{
+		elog(ERROR, "'%s' not found", buffer);
+		result[i_fullcomm] = NULL;
+	}
+	else
+	{
+		result[i_fullcomm] =
+				(char *) palloc((FULLCOMM_LEN + 1) * sizeof(char));
+		len = read(fd, result[i_fullcomm], FULLCOMM_LEN);
+		close(fd);
+		result[i_fullcomm][len] = '\0';
+	}
+	elog(DEBUG5, "pg_proctab: %s %s", buffer, result[i_fullcomm]);
+
+	/* Get the uid and username of the pid's owner. */
+	snprintf(buffer, sizeof(buffer) - 1, "%s/%d", PROCFS, session_id);
+	if (stat(buffer, &stat_struct) < 0)
+	{
+		elog(ERROR, "'%s' not found", buffer);
+		strncpy(result[i_uid], "-1", INTEGER_LEN);
+		result[i_username] = NULL;
+	}
+	else
+	{
+		struct passwd *pwd;
+
+		snprintf(result[i_uid], INTEGER_LEN, "%d", stat_struct.st_uid);
+		pwd = getpwuid(stat_struct.st_uid);
+		if (pwd == NULL)
+			result[i_username] = NULL;
+		else
+		{
+			result[i_username] = (char *) palloc((strlen(pwd->pw_name) +
+					1) * sizeof(char));
+			strncpy(result[i_username], pwd->pw_name,
+					sizeof(result[i_username]) - 1);
+		}
+	}
+
+	/* Get the process table information for the pid. */
+	snprintf(buffer, sizeof(buffer) - 1, "%s/%d/stat", PROCFS, session_id);
+	fd = open(buffer, O_RDONLY);
+	if (fd == -1)
+	{
+		elog(ERROR, "%d/stat not found", session_id);
+		return 0;
+	}
+	len = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	buffer[len] = '\0';
+	elog(DEBUG5, "pg_proctab: %s", buffer);
+
+	p = buffer;
+
+	/* pid */
+	GET_NEXT_VALUE(p, q, result[i_pid], length, "pid not found", ' ');
+
+	/* comm */
+	++p;
+	if ((q = strchr(p, ')')) == NULL)
+	{
+		elog(ERROR, "pg_proctab: comm not found");
+		return 0;
+	}
+	length = q - p;
+	strncpy(result[i_comm], p, length);
+	result[i_comm][length] = '\0';
+	p = q + 2;
+
+	/* state */
+	result[i_state][0] = *p;
+	result[i_state][1] = '\0';
+	p = p + 2;
+
+	/* ppid */
+	GET_NEXT_VALUE(p, q, result[i_ppid], length, "ppid not found", ' ');
+
+	/* pgrp */
+	GET_NEXT_VALUE(p, q, result[i_pgrp], length, "pg_sessions not found", ' ');
+
+	/* session */
+	GET_NEXT_VALUE(p, q, result[i_session], length, "session not found", ' ');
+
+	/* tty_nr */
+	GET_NEXT_VALUE(p, q, result[i_tty_nr], length, "tty_nr not found", ' ');
+
+	/* tpgid */
+	GET_NEXT_VALUE(p, q, result[i_tpgid], length, "tpgid not found", ' ');
+
+	/* flags */
+	GET_NEXT_VALUE(p, q, result[i_flags], length, "flags not found", ' ');
+
+	/* minflt */
+	GET_NEXT_VALUE(p, q, result[i_minflt], length, "minflt not found", ' ');
+
+	/* cminflt */
+	GET_NEXT_VALUE(p, q, result[i_cminflt], length, "cminflt not found", ' ');
+
+	/* majflt */
+	GET_NEXT_VALUE(p, q, result[i_majflt], length, "majflt not found", ' ');
+
+	/* cmajflt */
+	GET_NEXT_VALUE(p, q, result[i_cmajflt], length, "cmajflt not found", ' ');
+
+		/* utime */
+	GET_NEXT_VALUE(p, q, result[i_utime], length, "utime not found", ' ');
+
+	/* stime */
+	GET_NEXT_VALUE(p, q, result[i_stime], length, "stime not found", ' ');
+
+	/* cutime */
+	GET_NEXT_VALUE(p, q, result[i_cutime], length, "cutime not found", ' ');
+
+	/* cstime */
+	GET_NEXT_VALUE(p, q, result[i_cstime], length, "cstime not found", ' ');
+
+	/* priority */
+	GET_NEXT_VALUE(p, q, result[i_priority], length, "priority not found", ' ');
+
+	/* nice */
+	GET_NEXT_VALUE(p, q, result[i_nice], length, "nice not found", ' ');
+
+	/* num_threads */
+	GET_NEXT_VALUE(p, q, result[i_num_threads], length,
+				"num_threads not found", ' ');
+
+	/* itrealvalue */
+	GET_NEXT_VALUE(p, q, result[i_itrealvalue], length,
+			"itrealvalue not found", ' ');
+
+	/* starttime */
+	GET_NEXT_VALUE(p, q, result[i_starttime], length, "starttime not found",
+			' ');
+
+	/* vsize */
+	GET_NEXT_VALUE(p, q, result[i_vsize], length, "vsize not found", ' ');
+
+	/* rss */
+	GET_NEXT_VALUE(p, q, result[i_rss], length, "rss not found", ' ');
+
+	SKIP_TOKEN(p);			/* skip rlim */
+	SKIP_TOKEN(p);			/* skip startcode */
+	SKIP_TOKEN(p);			/* skip endcode */
+	SKIP_TOKEN(p);			/* skip startstack */
+	SKIP_TOKEN(p);			/* skip kstkesp */
+	SKIP_TOKEN(p);			/* skip kstkeip */
+	SKIP_TOKEN(p);			/* skip signal (obsolete) */
+	SKIP_TOKEN(p);			/* skip blocked (obsolete) */
+	SKIP_TOKEN(p);			/* skip sigignore (obsolete) */
+	SKIP_TOKEN(p);			/* skip sigcatch (obsolete) */
+	SKIP_TOKEN(p);			/* skip wchan */
+	SKIP_TOKEN(p);			/* skip nswap (place holder) */
+	SKIP_TOKEN(p);			/* skip cnswap (place holder) */
+
+	/* exit_signal */
+	GET_NEXT_VALUE(p, q, result[i_exit_signal], length,
+			"exit_signal not found", ' ');
+
+	/* processor */
+	GET_NEXT_VALUE(p, q, result[i_processor], length, "processor not found",
+			' ');
+
+	/* rt_priority */
+	GET_NEXT_VALUE(p, q, result[i_rt_priority], length,
+			"rt_priority not found", ' ');
+
+	/* policy */
+	GET_NEXT_VALUE(p, q, result[i_policy], length, "policy not found", ' ');
+
+	/* delayacct_blkio_ticks */
+	/*
+	 * It appears sometimes this is the last item in /proc/PID/stat and
+	 * sometimes it's not, depending on the version of the kernel and
+	 * possibly the architecture.  So first test if it is the last item
+	 * before determining how to deliminate it.
+	 */
+	if (strchr(p, ' ') == NULL)
+	{
+		GET_NEXT_VALUE(p, q, result[i_delayacct_blkio_ticks], length,
+				"delayacct_blkio_ticks not found", '\n');
+	}
+	else
+	{
+		GET_NEXT_VALUE(p, q, result[i_delayacct_blkio_ticks], length,
+				"delayacct_blkio_ticks not found", ' ');
+	}
+
+	/* Get i/o stats per process. */
+
+	snprintf(buffer, sizeof(buffer) - 1, "%s/%d/io", PROCFS, session_id);
+	fd = open(buffer, O_RDONLY);
+	if (fd == -1)
+	{
+		/* If the i/o stats are not available, set the result to zero. */
+		elog(NOTICE, "i/o stats collection for Linux not enabled");
+		strncpy(result[i_rchar], "0", BIGINT_LEN);
+		strncpy(result[i_wchar], "0", BIGINT_LEN);
+		strncpy(result[i_syscr], "0", BIGINT_LEN);
+		strncpy(result[i_syscw], "0", BIGINT_LEN);
+		strncpy(result[i_reads], "0", BIGINT_LEN);
+		strncpy(result[i_writes], "0", BIGINT_LEN);
+		strncpy(result[i_cwrites], "0", BIGINT_LEN);
+	}
+	else
+	{
+		len = read(fd, buffer, sizeof(buffer) - 1);
+		close(fd);
+		buffer[len] = '\0';
+		p = buffer;
+		GET_VALUE(result[i_rchar]);
+		GET_VALUE(result[i_wchar]);
+		GET_VALUE(result[i_syscr]);
+		GET_VALUE(result[i_syscw]);
+		GET_VALUE(result[i_reads]);
+		GET_VALUE(result[i_writes]);
+		GET_VALUE(result[i_cwrites]);
+	}
+	return 1;
 }
