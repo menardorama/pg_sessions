@@ -817,7 +817,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	/*
 	 * Rename file into place, so we atomically replace any old one.
 	 */
-	(void) durable_rename(PGSS_DUMP_FILE ".tmp", PGSS_DUMP_FILE, LOG);
+	/*(void) durable_rename(PGSS_DUMP_FILE ".tmp", PGSS_DUMP_FILE, LOG);*/
 
 	/* Unlink query-texts file; it's not needed while shutdown */
 	unlink(PGSS_TEXT_FILE);

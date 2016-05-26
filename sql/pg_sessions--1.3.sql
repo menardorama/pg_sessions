@@ -75,3 +75,4 @@ GRANT SELECT ON pg_sessions TO PUBLIC;
 
 -- Don't want this to be available to non-superusers.
 REVOKE ALL ON FUNCTION pg_sessions_reset() FROM PUBLIC;
+
