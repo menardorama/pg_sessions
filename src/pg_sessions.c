@@ -335,6 +335,8 @@ static int	pgss_max;								/* max # statements to track */
 static int	pgss_track;								/* tracking level */
 static bool pgss_track_utility;						/* whether to track utility commands */
 static bool pgss_save;								/* whether to save stats across shutdown */
+static bool pgss_track_all_steps;					/* whether to track activity at all Executor Hooks */
+static bool pgss_track_system_metrics;				/* whether to track pid system metrics */
 
 
 #define pgss_enabled() \
@@ -467,6 +469,28 @@ _PG_init(void)
 							 &pgss_save,
 							 true,
 							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("pg_sessions.track_all_steps",
+			   "Track activity at all steps of the Execution.",
+							 NULL,
+							 &pgss_track_all_steps,
+							 true,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("pg_sessions.track_system_metrics",
+			   "Track activity at all steps of the Execution.",
+							 NULL,
+							 &pgss_track_system_metrics,
+							 true,
+							 PGC_SUSET,
 							 0,
 							 NULL,
 							 NULL,
@@ -895,15 +919,19 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 	 * the normalized string would be the same as the query text anyway, so
 	 * there's no need for an early entry.
 	 */
-	Status = 0;
+
 	if (jstate.clocations_count > 0)
-		pgss_store(pstate->p_sourcetext,
-				   query->queryId,
-				   Status,
-				   0,
-				   0,
-				   NULL,
-				   &jstate);
+		if (pgss_track_all_steps)
+		{
+			Status = 0;
+			pgss_store(pstate->p_sourcetext,
+					   query->queryId,
+					   Status,
+					   0,
+					   0,
+					   NULL,
+					   &jstate);
+		}
 }
 
 /*
@@ -973,14 +1001,17 @@ pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
 		nested_level--;
-        Status = 2;
-        pgss_store(queryDesc->sourceText,
-                           queryDesc->plannedstmt->queryId,
-						   Status,
-                           queryDesc->totaltime->total * 1000.0,                /* convert to msec */
-                           queryDesc->estate->es_processed,
-                           &queryDesc->totaltime->bufusage,
-                           NULL);
+		if (pgss_track_all_steps)
+		{
+			Status = 2;
+			pgss_store(queryDesc->sourceText,
+							   queryDesc->plannedstmt->queryId,
+							   Status,
+							   queryDesc->totaltime->total * 1000.0,                /* convert to msec */
+							   queryDesc->estate->es_processed,
+							   &queryDesc->totaltime->bufusage,
+							   NULL);
+		}
 	}
 	PG_CATCH();
 	{
@@ -1005,14 +1036,17 @@ pgss_ExecutorFinish(QueryDesc *queryDesc)
 		else
 			standard_ExecutorFinish(queryDesc);
 		nested_level--;
-        Status = 3;
-        pgss_store(queryDesc->sourceText,
-                           queryDesc->plannedstmt->queryId,
-						   Status,
-                           queryDesc->totaltime->total * 1000.0,                /* convert to msec */
-                           queryDesc->estate->es_processed,
-                           &queryDesc->totaltime->bufusage,
-                           NULL);
+		if (pgss_track_all_steps)
+		{
+			Status = 3;
+			pgss_store(queryDesc->sourceText,
+							   queryDesc->plannedstmt->queryId,
+							   Status,
+							   queryDesc->totaltime->total * 1000.0,                /* convert to msec */
+							   queryDesc->estate->es_processed,
+							   &queryDesc->totaltime->bufusage,
+							   NULL);
+		}
 	}
 	PG_CATCH();
 	{
@@ -1384,144 +1418,129 @@ pgss_store(const char *query, uint32 queryId, uint64 State,
 		e->counters.usage += USAGE_EXEC(total_time);
 
 
-		/* Now fetching system metrics for the given pid
-		 * We define the structure
-		*/
-		values = NULL;
-		values = (char **) palloc(39 * sizeof(char *));
-		values[i_pid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_comm] = (char *) palloc(1024 * sizeof(char));
-		values[i_state] = (char *) palloc(2 * sizeof(char));
-		values[i_ppid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_pgrp] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_session] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_tty_nr] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_tpgid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_flags] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_minflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_cminflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_majflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_cmajflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-
-		/* FIXME: Need to figure out correct length to hold a C double type. */
-		values[i_utime] = (char *) palloc(32 * sizeof(char));
-		values[i_stime] = (char *) palloc(32 * sizeof(char));
-
-		values[i_cutime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_cstime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_priority] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_nice] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_num_threads] =
-				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_itrealvalue] =
-				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_starttime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_vsize] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_rss] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_exit_signal] =
-				(char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_processor] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_rt_priority] =
-				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_policy] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_delayacct_blkio_ticks] =
-				(char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_uid] = (char *) palloc((INTEGER_LEN + 1) * sizeof(char));
-		values[i_rchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_wchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_syscr] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_syscw] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_reads] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_writes] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-		values[i_cwrites] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-
-		if (get_proctab(key.pid, values) == 1)
+		if (pgss_track_system_metrics)
 		{
-			/* CPU User Time */
-			if (e->counters.user_time > 0)
-			{
-				e->counters.user_time = S64(values[i_utime]) - e->counters.user_time;
-			}
-			else
-			{
-				e->counters.user_time = S64(values[i_utime]);
-			}
+#ifdef __linux__
+			/* Now fetching system metrics for the given pid
+			 * We define the structure
+			*/
+			values = NULL;
+			values = (char **) palloc(39 * sizeof(char *));
+			values[i_state] = (char *) palloc(2 * sizeof(char));
+			values[i_minflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_cminflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_majflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_cmajflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_utime] = (char *) palloc(32 * sizeof(char));
+			values[i_stime] = (char *) palloc(32 * sizeof(char));
+			values[i_cutime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_cstime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_num_threads] =
+			    (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_itrealvalue] =
+			    (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_vsize] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_rss] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_delayacct_blkio_ticks] =
+			    (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_rchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_wchar] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_syscr] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_syscw] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_reads] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_writes] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
+			values[i_cwrites] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 
-			/* CPU System Time */
-			if (e->counters.system_time > 0)
-			{
-				e->counters.system_time = S64(values[i_stime]) - e->counters.system_time;
-			}
-			else
-			{
-				e->counters.system_time = S64(values[i_stime]);
-			}
 
-			/* Virtual memory size */
-			e->counters.virtual_memory_size = S64(values[i_vsize]);
+			if (get_proctab(key.pid, values) == 1)
+			{
+				/* CPU User Time */
+				if (e->counters.user_time > 0)
+				{
+					e->counters.user_time = S64(values[i_utime]) - e->counters.user_time;
+				}
+				else
+				{
+					e->counters.user_time = S64(values[i_utime]);
+				}
 
-			/*Resident Memory size */
-			e->counters.resident_memory_size = S64(values[i_rss]);
+				/* CPU System Time */
+				if (e->counters.system_time > 0)
+				{
+					e->counters.system_time = S64(values[i_stime]) - e->counters.system_time;
+				}
+				else
+				{
+					e->counters.system_time = S64(values[i_stime]);
+				}
 
-			/* Bytes Read (All) */
-			if (e->counters.bytes_reads > 0)
-			{
-				e->counters.bytes_reads = S64(values[i_rchar]) - e->counters.bytes_reads;
-			}
-			else
-			{
-				e->counters.bytes_reads = S64(values[i_rchar]);
-			}
+				/* Virtual memory size */
+				e->counters.virtual_memory_size = S64(values[i_vsize]);
 
-			/* Bytes Writes (All) */
-			if (e->counters.bytes_writes > 0)
-			{
-				e->counters.bytes_writes = S64(values[i_wchar]) - e->counters.bytes_writes;
-			}
-			else
-			{
-				e->counters.bytes_writes = S64(values[i_wchar]);
-			}
+				/*Resident Memory size */
+				e->counters.resident_memory_size = S64(values[i_rss]);
 
-			/* IOPS Read */
-			if (e->counters.iops_reads > 0)
-			{
-				e->counters.iops_reads = S64(values[i_syscr]) - e->counters.iops_reads;
-			}
-			else
-			{
-				e->counters.iops_writes = S64(values[i_syscw]);
-			}
+				/* Bytes Read (All) */
+				if (e->counters.bytes_reads > 0)
+				{
+					e->counters.bytes_reads = S64(values[i_rchar]) - e->counters.bytes_reads;
+				}
+				else
+				{
+					e->counters.bytes_reads = S64(values[i_rchar]);
+				}
 
-			/* IOPS Writes */
-			if (e->counters.iops_writes > 0)
-			{
-				e->counters.iops_writes = S64(values[i_syscw]) - e->counters.iops_writes;
-			}
-			else
-			{
-				e->counters.iops_writes = S64(values[i_syscw]);
-			}
+				/* Bytes Writes (All) */
+				if (e->counters.bytes_writes > 0)
+				{
+					e->counters.bytes_writes = S64(values[i_wchar]) - e->counters.bytes_writes;
+				}
+				else
+				{
+					e->counters.bytes_writes = S64(values[i_wchar]);
+				}
 
-			/* Physical Reads */
-			if (e->counters.bytes_preads > 0)
-			{
-				e->counters.bytes_preads = S64(values[i_reads]) - e->counters.bytes_preads;
-			}
-			else
-			{
-				e->counters.bytes_preads = S64(values[i_reads]);
-			}
+				/* IOPS Read */
+				if (e->counters.iops_reads > 0)
+				{
+					e->counters.iops_reads = S64(values[i_syscr]) - e->counters.iops_reads;
+				}
+				else
+				{
+					e->counters.iops_writes = S64(values[i_syscw]);
+				}
 
-			/* Physical Writes */
-			if (e->counters.bytes_pwrites > 0)
-			{
-				e->counters.bytes_pwrites = S64(values[i_writes]) - e->counters.bytes_pwrites;
+				/* IOPS Writes */
+				if (e->counters.iops_writes > 0)
+				{
+					e->counters.iops_writes = S64(values[i_syscw]) - e->counters.iops_writes;
+				}
+				else
+				{
+					e->counters.iops_writes = S64(values[i_syscw]);
+				}
+
+				/* Physical Reads */
+				if (e->counters.bytes_preads > 0)
+				{
+					e->counters.bytes_preads = S64(values[i_reads]) - e->counters.bytes_preads;
+				}
+				else
+				{
+					e->counters.bytes_preads = S64(values[i_reads]);
+				}
+
+				/* Physical Writes */
+				if (e->counters.bytes_pwrites > 0)
+				{
+					e->counters.bytes_pwrites = S64(values[i_writes]) - e->counters.bytes_pwrites;
+				}
+				else
+				{
+					e->counters.bytes_pwrites = S64(values[i_writes]);
+				}
 			}
-			else
-			{
-				e->counters.bytes_pwrites = S64(values[i_writes]);
-			}
+#endif /* __linux__ */
 		}
 		SpinLockRelease(&e->mutex);
 	}
@@ -3384,7 +3403,6 @@ get_proctab(uint32 session_id, char **result)
 
 	int length;
 
-	struct stat stat_struct;
 
 	struct statfs sb;
 	int fd;
@@ -3398,52 +3416,6 @@ get_proctab(uint32 session_id, char **result)
 	{
 		elog(ERROR, "proc filesystem not mounted on " PROCFS "\n");
 		return 0;
-	}
-
-	/* Read the stat info for the pid. */
-
-
-	/* Get the full command line information. */
-	snprintf(buffer, sizeof(buffer) - 1, "%s/%d/cmdline", PROCFS, session_id);
-	fd = open(buffer, O_RDONLY);
-	if (fd == -1)
-	{
-		elog(ERROR, "'%s' not found", buffer);
-		result[i_fullcomm] = NULL;
-	}
-	else
-	{
-		result[i_fullcomm] =
-				(char *) palloc((FULLCOMM_LEN + 1) * sizeof(char));
-		len = read(fd, result[i_fullcomm], FULLCOMM_LEN);
-		close(fd);
-		result[i_fullcomm][len] = '\0';
-	}
-	elog(DEBUG5, "pg_proctab: %s %s", buffer, result[i_fullcomm]);
-
-	/* Get the uid and username of the pid's owner. */
-	snprintf(buffer, sizeof(buffer) - 1, "%s/%d", PROCFS, session_id);
-	if (stat(buffer, &stat_struct) < 0)
-	{
-		elog(ERROR, "'%s' not found", buffer);
-		strncpy(result[i_uid], "-1", INTEGER_LEN);
-		result[i_username] = NULL;
-	}
-	else
-	{
-		struct passwd *pwd;
-
-		snprintf(result[i_uid], INTEGER_LEN, "%d", stat_struct.st_uid);
-		pwd = getpwuid(stat_struct.st_uid);
-		if (pwd == NULL)
-			result[i_username] = NULL;
-		else
-		{
-			result[i_username] = (char *) palloc((strlen(pwd->pw_name) +
-					1) * sizeof(char));
-			strncpy(result[i_username], pwd->pw_name,
-					sizeof(result[i_username]) - 1);
-		}
 	}
 
 	/* Get the process table information for the pid. */
@@ -3461,43 +3433,27 @@ get_proctab(uint32 session_id, char **result)
 
 	p = buffer;
 
-	/* pid */
-	GET_NEXT_VALUE(p, q, result[i_pid], length, "pid not found", ' ');
-
-	/* comm */
-	++p;
-	if ((q = strchr(p, ')')) == NULL)
-	{
-		elog(ERROR, "pg_proctab: comm not found");
-		return 0;
-	}
-	length = q - p;
-	strncpy(result[i_comm], p, length);
-	result[i_comm][length] = '\0';
-	p = q + 2;
-
 	/* state */
 	result[i_state][0] = *p;
 	result[i_state][1] = '\0';
 	p = p + 2;
 
 	/* ppid */
-	GET_NEXT_VALUE(p, q, result[i_ppid], length, "ppid not found", ' ');
-
+	SKIP_TOKEN(p);
 	/* pgrp */
-	GET_NEXT_VALUE(p, q, result[i_pgrp], length, "pg_sessions not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* session */
-	GET_NEXT_VALUE(p, q, result[i_session], length, "session not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* tty_nr */
-	GET_NEXT_VALUE(p, q, result[i_tty_nr], length, "tty_nr not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* tpgid */
-	GET_NEXT_VALUE(p, q, result[i_tpgid], length, "tpgid not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* flags */
-	GET_NEXT_VALUE(p, q, result[i_flags], length, "flags not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* minflt */
 	GET_NEXT_VALUE(p, q, result[i_minflt], length, "minflt not found", ' ');
@@ -3511,7 +3467,7 @@ get_proctab(uint32 session_id, char **result)
 	/* cmajflt */
 	GET_NEXT_VALUE(p, q, result[i_cmajflt], length, "cmajflt not found", ' ');
 
-		/* utime */
+	/* utime */
 	GET_NEXT_VALUE(p, q, result[i_utime], length, "utime not found", ' ');
 
 	/* stime */
@@ -3524,10 +3480,9 @@ get_proctab(uint32 session_id, char **result)
 	GET_NEXT_VALUE(p, q, result[i_cstime], length, "cstime not found", ' ');
 
 	/* priority */
-	GET_NEXT_VALUE(p, q, result[i_priority], length, "priority not found", ' ');
-
+	SKIP_TOKEN(p);
 	/* nice */
-	GET_NEXT_VALUE(p, q, result[i_nice], length, "nice not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* num_threads */
 	GET_NEXT_VALUE(p, q, result[i_num_threads], length,
@@ -3538,8 +3493,7 @@ get_proctab(uint32 session_id, char **result)
 			"itrealvalue not found", ' ');
 
 	/* starttime */
-	GET_NEXT_VALUE(p, q, result[i_starttime], length, "starttime not found",
-			' ');
+	SKIP_TOKEN(p);
 
 	/* vsize */
 	GET_NEXT_VALUE(p, q, result[i_vsize], length, "vsize not found", ' ');
@@ -3562,19 +3516,15 @@ get_proctab(uint32 session_id, char **result)
 	SKIP_TOKEN(p);			/* skip cnswap (place holder) */
 
 	/* exit_signal */
-	GET_NEXT_VALUE(p, q, result[i_exit_signal], length,
-			"exit_signal not found", ' ');
-
+	SKIP_TOKEN(p);
 	/* processor */
-	GET_NEXT_VALUE(p, q, result[i_processor], length, "processor not found",
-			' ');
+	SKIP_TOKEN(p);
 
 	/* rt_priority */
-	GET_NEXT_VALUE(p, q, result[i_rt_priority], length,
-			"rt_priority not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* policy */
-	GET_NEXT_VALUE(p, q, result[i_policy], length, "policy not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* delayacct_blkio_ticks */
 	/*
