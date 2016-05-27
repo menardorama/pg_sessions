@@ -23,7 +23,7 @@
    "release_status": "testing",
    "generated_by": "Thomas Menard",
    "meta-spec": {
-      "version": "0.0.3",
+      "version": "1.0.0",
       "url": "http://pgxn.org/meta/spec.txt"
    }
 }
