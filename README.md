@@ -10,9 +10,14 @@ This project is made because of the lack of admin view on Postgresql
 
 # How to install
 
+Required version : Postgresql 9.5
+
+This is not working on lower versions
+
+
 Simply fetch the repository
 
-And as root : 
+And as root :
 <pre>
 export PATH=$PATH:/usr/pgsql/bin
 make
@@ -32,7 +37,7 @@ pg_sessions.track_all_steps = true # Log for all Executor Hooks (small overhead 
 pg_sessions.track_system_metrics = true # Disable the system metrics
 </pre>
 
-And in postgresql : 
+And in postgresql :
 <pre>
 CREATE EXTENSION pg_sessions;
 </pre>
@@ -43,44 +48,44 @@ pg_sessions view :
 <pre>
 postgres=# \d pg_sessions;
                      View "public.pg_sessions"
-         Column          |            Type             | Modifiers 
+         Column          |            Type             | Modifiers
 -------------------------+-----------------------------+-----------
- usename                 | name                        | 
- datname                 | name                        | 
- pid                     | bigint                      | 
- queryid                 | bigint                      | 
- query                   | text                        | 
- calls                   | bigint                      | 
- last_executed_timestamp | timestamp without time zone | 
- status                  | text                        | 
- total_time              | double precision            | 
- min_time                | double precision            | 
- max_time                | double precision            | 
- mean_time               | double precision            | 
- stddev_time             | double precision            | 
- rows                    | bigint                      | 
- shared_blks_hit         | bigint                      | 
- shared_blks_read        | bigint                      | 
- shared_blks_dirtied     | bigint                      | 
- shared_blks_written     | bigint                      | 
- local_blks_hit          | bigint                      | 
- local_blks_read         | bigint                      | 
- local_blks_dirtied      | bigint                      | 
- local_blks_written      | bigint                      | 
- temp_blks_read          | bigint                      | 
- temp_blks_written       | bigint                      | 
- blk_read_time           | double precision            | 
- blk_write_time          | double precision            | 
- user_time               | bigint                      | 
- system_time             | bigint                      | 
- virtual_memory_size     | text                        | 
- resident_memory_size    | text                        | 
- bytes_reads             | text                        | 
- bytes_writes            | text                        | 
- iops_reads              | bigint                      | 
- iops_writes             | bigint                      | 
- bytes_preads            | text                        | 
- bytes_pwrites           | text                        | 
+ usename                 | name                        |
+ datname                 | name                        |
+ pid                     | bigint                      |
+ queryid                 | bigint                      |
+ query                   | text                        |
+ calls                   | bigint                      |
+ last_executed_timestamp | timestamp without time zone |
+ status                  | text                        |
+ total_time              | double precision            |
+ min_time                | double precision            |
+ max_time                | double precision            |
+ mean_time               | double precision            |
+ stddev_time             | double precision            |
+ rows                    | bigint                      |
+ shared_blks_hit         | bigint                      |
+ shared_blks_read        | bigint                      |
+ shared_blks_dirtied     | bigint                      |
+ shared_blks_written     | bigint                      |
+ local_blks_hit          | bigint                      |
+ local_blks_read         | bigint                      |
+ local_blks_dirtied      | bigint                      |
+ local_blks_written      | bigint                      |
+ temp_blks_read          | bigint                      |
+ temp_blks_written       | bigint                      |
+ blk_read_time           | double precision            |
+ blk_write_time          | double precision            |
+ user_time               | bigint                      |
+ system_time             | bigint                      |
+ virtual_memory_size     | text                        |
+ resident_memory_size    | text                        |
+ bytes_reads             | text                        |
+ bytes_writes            | text                        |
+ iops_reads              | bigint                      |
+ iops_writes             | bigint                      |
+ bytes_preads            | text                        |
+ bytes_pwrites           | text                        |
 </pre>
 
 Keep in mind that the metrics are pid/queryid based
