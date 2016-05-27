@@ -3,7 +3,7 @@
    "abstract": "Merge Postgresql session/query metrics with linux process table",
    "description": "pg_sessions intend to fill the hole in sessions monitoring where you can have the operating system statistics displayed with the sessions currently running",
    "version": "0.0.3",
-   "maintainer": "Thomas Menard",
+   "maintainer": "Thomas Menard <menardorama@gmail.com>",
    "license": {
       "PostgreSQL": "http://www.postgresql.org/about/licence"
    },
@@ -25,5 +25,8 @@
    "meta-spec": {
       "version": "1.0.0",
       "url": "http://pgxn.org/meta/spec.txt"
-   }
+   },
+   "tags": [
+     "testing"
+   ]
 }
