@@ -24,7 +24,7 @@
      "pg_sessions": {
         "abstract": "Postgresql and Operating system process table",
         "file": "sql/pg_sessions--1.3.sql",
-        "version": "0.0.3"
+        "version": "0.0.4"
      }
    },
    "resources": {
