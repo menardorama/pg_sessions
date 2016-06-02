@@ -2,7 +2,7 @@
    "name": "pg_sessions",
    "abstract": "Merge Postgresql session/query metrics with linux process table",
    "description": "pg_sessions intend to fill the hole in sessions monitoring where you can have the operating system statistics displayed with the sessions currently running",
-   "version": "0.0.3",
+   "version": "0.0.4",
    "maintainer": [
       "Thomas Menard <menardorama@gmail.com>"
    ],
@@ -13,7 +13,7 @@
       "runtime": {
          "requires": {
             "plpgsql": 0,
-            "PostgreSQL": "9.5.0"
+            "PostgreSQL": "9.4.0"
          },
          "recommends": {
             "PostgreSQL": "9.5.0"
