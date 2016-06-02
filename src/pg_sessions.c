@@ -1427,18 +1427,10 @@ pgss_store(const char *query, uint32 queryId, uint64 State,
 			values = NULL;
 			values = (char **) palloc(39 * sizeof(char *));
 			values[i_state] = (char *) palloc(2 * sizeof(char));
-			values[i_minflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-			values[i_cminflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-			values[i_majflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-			values[i_cmajflt] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 			values[i_utime] = (char *) palloc(32 * sizeof(char));
 			values[i_stime] = (char *) palloc(32 * sizeof(char));
 			values[i_cutime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 			values[i_cstime] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-			values[i_num_threads] =
-			    (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
-			values[i_itrealvalue] =
-			    (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 			values[i_vsize] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 			values[i_rss] = (char *) palloc((BIGINT_LEN + 1) * sizeof(char));
 			values[i_delayacct_blkio_ticks] =
@@ -2633,10 +2625,8 @@ JumbleQuery(pgssJumbleState *jstate, Query *query)
 	JumbleRangeTable(jstate, query->rtable);
 	JumbleExpr(jstate, (Node *) query->jointree);
 	JumbleExpr(jstate, (Node *) query->targetList);
-	JumbleExpr(jstate, (Node *) query->onConflict);
 	JumbleExpr(jstate, (Node *) query->returningList);
 	JumbleExpr(jstate, (Node *) query->groupClause);
-	JumbleExpr(jstate, (Node *) query->groupingSets);
 	JumbleExpr(jstate, query->havingQual);
 	JumbleExpr(jstate, (Node *) query->windowClause);
 	JumbleExpr(jstate, (Node *) query->distinctClause);
@@ -2645,6 +2635,10 @@ JumbleQuery(pgssJumbleState *jstate, Query *query)
 	JumbleExpr(jstate, query->limitCount);
 	/* we ignore rowMarks */
 	JumbleExpr(jstate, query->setOperations);
+#ifdef PG95
+	JumbleExpr(jstate, (Node *) query->groupingSets);
+	JumbleExpr(jstate, (Node *) query->onConflict);
+#endif
 }
 
 /*
@@ -2665,7 +2659,9 @@ JumbleRangeTable(pgssJumbleState *jstate, List *rtable)
 		{
 			case RTE_RELATION:
 				APP_JUMB(rte->relid);
+#ifdef PG95
 				JumbleExpr(jstate, (Node *) rte->tablesample);
+#endif
 				break;
 			case RTE_SUBQUERY:
 				JumbleQuery(jstate, rte->subquery);
@@ -2768,6 +2764,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) expr->aggfilter);
 			}
 			break;
+#ifdef PG95
 		case T_GroupingFunc:
 			{
 				GroupingFunc *grpnode = (GroupingFunc *) node;
@@ -2775,6 +2772,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) grpnode->refs);
 			}
 			break;
+#endif
 		case T_WindowFunc:
 			{
 				WindowFunc *expr = (WindowFunc *) node;
@@ -2843,7 +2841,9 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				SubLink    *sublink = (SubLink *) node;
 
 				APP_JUMB(sublink->subLinkType);
+#ifdef PG95
 				APP_JUMB(sublink->subLinkId);
+#endif
 				JumbleExpr(jstate, (Node *) sublink->testexpr);
 				JumbleQuery(jstate, (Query *) sublink->subselect);
 			}
@@ -3010,6 +3010,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				APP_JUMB(ce->cursor_param);
 			}
 			break;
+#ifdef PG95
 		case T_InferenceElem:
 			{
 				InferenceElem *ie = (InferenceElem *) node;
@@ -3019,6 +3020,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, ie->expr);
 			}
 			break;
+#endif
 		case T_TargetEntry:
 			{
 				TargetEntry *tle = (TargetEntry *) node;
@@ -3055,6 +3057,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, from->quals);
 			}
 			break;
+#ifdef PG95
 		case T_OnConflictExpr:
 			{
 				OnConflictExpr *conf = (OnConflictExpr *) node;
@@ -3069,6 +3072,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) conf->exclRelTlist);
 			}
 			break;
+#endif
 		case T_List:
 			foreach(temp, (List *) node)
 			{
@@ -3091,6 +3095,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				APP_JUMB(sgc->nulls_first);
 			}
 			break;
+#ifdef PG95
 		case T_GroupingSet:
 			{
 				GroupingSet *gsnode = (GroupingSet *) node;
@@ -3098,6 +3103,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) gsnode->content);
 			}
 			break;
+#endif
 		case T_WindowClause:
 			{
 				WindowClause *wc = (WindowClause *) node;
@@ -3136,6 +3142,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, rtfunc->funcexpr);
 			}
 			break;
+#ifdef PG95
 		case T_TableSampleClause:
 			{
 				TableSampleClause *tsc = (TableSampleClause *) node;
@@ -3145,6 +3152,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) tsc->repeatable);
 			}
 			break;
+#endif
 		default:
 			/* Only a warning, since we can stumble along anyway */
 			elog(WARNING, "unrecognized node type: %d",
@@ -3306,9 +3314,11 @@ fill_in_constant_lengths(pgssJumbleState *jstate, const char *query)
 							 ScanKeywords,
 							 NumScanKeywords);
 
-	/* we don't want to re-emit any escape string warnings */
-	yyextra.escape_string_warning = false;
 
+	/* we don't want to re-emit any escape string warnings */
+#ifdef PG95
+	yyextra.escape_string_warning = false;
+#endif
 	/* Search for each constant, in sequence */
 	for (i = 0; i < jstate->clocations_count; i++)
 	{
@@ -3456,16 +3466,16 @@ get_proctab(uint32 session_id, char **result)
 	SKIP_TOKEN(p);
 
 	/* minflt */
-	GET_NEXT_VALUE(p, q, result[i_minflt], length, "minflt not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* cminflt */
-	GET_NEXT_VALUE(p, q, result[i_cminflt], length, "cminflt not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* majflt */
-	GET_NEXT_VALUE(p, q, result[i_majflt], length, "majflt not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* cmajflt */
-	GET_NEXT_VALUE(p, q, result[i_cmajflt], length, "cmajflt not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* utime */
 	GET_NEXT_VALUE(p, q, result[i_utime], length, "utime not found", ' ');
@@ -3485,12 +3495,10 @@ get_proctab(uint32 session_id, char **result)
 	SKIP_TOKEN(p);
 
 	/* num_threads */
-	GET_NEXT_VALUE(p, q, result[i_num_threads], length,
-				"num_threads not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* itrealvalue */
-	GET_NEXT_VALUE(p, q, result[i_itrealvalue], length,
-			"itrealvalue not found", ' ');
+	SKIP_TOKEN(p);
 
 	/* starttime */
 	SKIP_TOKEN(p);
